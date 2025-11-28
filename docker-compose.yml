@@ -7,9 +7,9 @@ services:
       - "8000:8000"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
-      - /data/compose:/opt/stacks:ro
-      - /data/backups:/opt/backups
-      - /data/backup-logs:/opt/backup-logs
+      - /opt/stacks:/opt/stacks:ro
+      - /opt/backups:/opt/backups
+      - /opt/backup-logs:/opt/backup-logs
       - ./config.yaml:/app/config.yaml:ro
     environment:
       - FLASK_SECRET=replace_this

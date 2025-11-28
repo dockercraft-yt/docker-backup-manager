@@ -1,0 +1,15 @@
+services:
+  backup-manager:
+    build: .
+    container_name: docker-backup-manager
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - /opt/stacks:/opt/stacks:ro
+      - /opt/backups:/opt/backups
+      - /opt/backup-logs:/opt/backup-logs
+      - ./config.yaml:/app/config.yaml:ro
+    environment:
+      - FLASK_SECRET=replace_this

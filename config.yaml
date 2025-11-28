@@ -1,0 +1,9 @@
+# === Docker Backup Configuration ===
+stacks_dir: "/opt/stacks"
+backup_dir: "/opt/backups"
+log_dir: "/opt/backup-logs"
+include_data: true
+skip_stop:
+  - "traefik"
+retention_days: 7
+log_retention_days: 14

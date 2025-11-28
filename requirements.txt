@@ -1,0 +1,6 @@
+Flask>=2.2
+PyYAML>=6.0
+docker>=6.0.0
+
+# WSGI server for production
+gunicorn>=20.1.0

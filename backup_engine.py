@@ -114,6 +114,16 @@ class BackupEngine:
         Returns:
             True if successful, False otherwise.
         """
+        # Prefer the docker CLI; if it's not available, log a clear error so
+        # the caller understands that the runtime has no docker executable.
+        if shutil.which("docker") is None:
+            self.log(
+                "❌ 'docker' executable not found in PATH; cannot run 'docker compose' commands. "
+                "Install Docker CLI in the container or enable a different orchestration method.",
+                level="ERROR",
+            )
+            return False
+
         try:
             result = subprocess.run(
                 ["docker", "compose"] + args,
@@ -124,17 +134,17 @@ class BackupEngine:
                 check=False,
                 timeout=120,
             )
-            
+
             if result.returncode != 0:
                 err_msg = result.stderr.strip() or result.stdout.strip()
                 self.log(f"⚠️  docker compose {' '.join(args)} failed: {err_msg}", level="WARNING")
                 return not check
-            
+
             if result.stdout.strip():
                 self.log(f"docker compose output: {result.stdout.strip()}", level="DEBUG")
-            
+
             return True
-            
+
         except subprocess.TimeoutExpired:
             self.log(f"❌ docker compose {' '.join(args)} timed out (120s)", level="ERROR")
             return False
@@ -151,17 +161,34 @@ class BackupEngine:
         Returns:
             True if running containers exist, False otherwise.
         """
+        # If the docker CLI is present, use it. Otherwise attempt a Docker
+        # SDK-based check (works when the container has access to the
+        # host Docker socket and python 'docker' package is installed).
+        if shutil.which("docker"):
+            try:
+                result = subprocess.run(
+                    ["docker", "compose", "ps", "-q"],
+                    cwd=stack_path,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    timeout=10,
+                    check=False,
+                )
+                containers = result.stdout.strip().splitlines()
+                return len(containers) > 0
+            except Exception as e:
+                self.log(f"⚠️  Could not check stack status at {stack_path}: {e}", level="WARNING")
+                return False
+
+        # Fallback: try Docker SDK
         try:
-            result = subprocess.run(
-                ["docker", "compose", "ps", "-q"],
-                cwd=stack_path,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                timeout=10,
-                check=False,
-            )
-            containers = result.stdout.strip().splitlines()
+            import docker as _docker
+
+            client = _docker.from_env()
+            project = os.path.basename(stack_path.rstrip("/"))
+            # Look for containers with the compose project label
+            containers = client.containers.list(all=False, filters={"label": f"com.docker.compose.project={project}"})
             return len(containers) > 0
         except Exception as e:
             self.log(f"⚠️  Could not check stack status at {stack_path}: {e}", level="WARNING")

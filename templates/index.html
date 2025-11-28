@@ -1,14 +1,166 @@
 {% extends "layout.html" %}
+
+{% block title %}Dashboard - Docker Backup Manager{% endblock %}
+{% block header %}📊 Dashboard{% endblock %}
+
 {% block content %}
-<form method="post" action="{{ url_for('backup') }}">
-<div class='space-y-2'>
-{% for s in stacks %}
-<label class='flex justify-between bg-slate-800 p-3 rounded'>
-<div><input type='checkbox' name='stack' value='{{s.name}}'/> {{s.name}}
-<div class='text-xs text-slate-400'>{{ "running" if s.running else "stopped" }}</div></div>
-</label>
-{% endfor %}
+<div class="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
+  <!-- Stats Cards -->
+  <div class="bg-slate-800 rounded-lg p-6 border border-slate-700">
+    <div class="text-slate-400 text-sm">Stacks Found</div>
+    <div class="text-3xl font-bold mt-2">{{ stacks|length }}</div>
+  </div>
+  
+  <div class="bg-slate-800 rounded-lg p-6 border border-slate-700">
+    <div class="text-slate-400 text-sm">Running</div>
+    <div class="text-3xl font-bold text-green-400 mt-2">{{ stacks|selectattr('running')|list|length }}</div>
+  </div>
+  
+  <div class="bg-slate-800 rounded-lg p-6 border border-slate-700">
+    <div class="text-slate-400 text-sm">Backup Status</div>
+    <div class="text-lg font-semibold mt-2">
+      {% if backup_in_progress %}
+        <span class="text-amber-400">🔄 In Progress</span>
+      {% else %}
+        <span class="text-green-400">✅ Ready</span>
+      {% endif %}
+    </div>
+  </div>
 </div>
-<button class='mt-4 bg-indigo-600 px-4 py-2 rounded'>Backup starten</button>
-</form>
+
+<!-- Backup Form -->
+<div class="bg-slate-800 rounded-lg p-6 border border-slate-700 mb-8">
+  <h3 class="text-xl font-semibold mb-4">🔄 Create Backup</h3>
+  
+  {% if stacks %}
+    <form method="post" action="{{ url_for('backup') }}" class="space-y-4">
+      <div class="space-y-2">
+        {% for stack in stacks %}
+          <label class="flex items-center p-3 rounded bg-slate-700 hover:bg-slate-600 cursor-pointer transition">
+            <input type="checkbox" name="stack" value="{{ stack.name }}" class="w-4 h-4 mr-3" />
+            <div class="flex-1">
+              <span class="font-medium">{{ stack.name }}</span>
+              <span class="text-xs text-slate-400 ml-2">
+                {% if stack.running %}
+                  <span class="text-green-400">● Running</span>
+                {% else %}
+                  <span class="text-gray-400">● Stopped</span>
+                {% endif %}
+                {% if stack.skip_stop %}
+                  <span class="text-amber-400 ml-2">(skip-stop)</span>
+                {% endif %}
+              </span>
+            </div>
+          </label>
+        {% endfor %}
+      </div>
+      
+      <button type="submit" class="w-full bg-indigo-600 hover:bg-indigo-500 px-4 py-3 rounded font-semibold transition {% if backup_in_progress %}opacity-50 cursor-not-allowed{% endif %}" {% if backup_in_progress %}disabled{% endif %}>
+        {% if backup_in_progress %}
+          🔄 Backup in Progress...
+        {% else %}
+          📦 Start Backup
+        {% endif %}
+      </button>
+    </form>
+  {% else %}
+    <div class="text-center py-8 text-slate-400">
+      <p>No stacks found in: <code class="bg-slate-700 px-2 py-1 rounded">{{ engine.stacks_dir }}</code></p>
+      <p class="text-xs mt-2">Mount or create stack directories to begin.</p>
+    </div>
+  {% endif %}
+</div>
+
+<!-- Stack Details -->
+<div class="bg-slate-800 rounded-lg p-6 border border-slate-700">
+  <h3 class="text-xl font-semibold mb-4">📋 Stack Details</h3>
+  
+  {% if stacks %}
+    <div class="overflow-x-auto">
+      <table class="w-full text-sm">
+        <thead class="border-b border-slate-600">
+          <tr>
+            <th class="text-left py-2 px-4">Stack Name</th>
+            <th class="text-left py-2 px-4">Status</th>
+            <th class="text-left py-2 px-4">Configuration</th>
+          </tr>
+        </thead>
+        <tbody class="divide-y divide-slate-700">
+          {% for stack in stacks %}
+            <tr class="hover:bg-slate-700 transition">
+              <td class="py-3 px-4 font-mono">{{ stack.name }}</td>
+              <td class="py-3 px-4">
+                {% if stack.running %}
+                  <span class="inline-block bg-green-900 text-green-100 px-3 py-1 rounded text-xs">● Running</span>
+                {% else %}
+                  <span class="inline-block bg-gray-900 text-gray-100 px-3 py-1 rounded text-xs">● Stopped</span>
+                {% endif %}
+              </td>
+              <td class="py-3 px-4 text-slate-400 text-xs">
+                {% if stack.skip_stop %}
+                  <span class="bg-amber-900 text-amber-100 px-2 py-1 rounded">Skip-Stop Enabled</span>
+                {% else %}
+                  <span class="text-slate-500">—</span>
+                {% endif %}
+              </td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  {% endif %}
+</div>
+
+<!-- Live Logs (Auto-Refresh) -->
+<div class="bg-slate-800 rounded-lg p-6 border border-slate-700 mt-8">
+  <div class="flex justify-between items-center mb-4">
+    <h3 class="text-xl font-semibold">📝 Recent Activity</h3>
+    <button onclick="refreshLogs()" class="text-sm bg-slate-700 hover:bg-slate-600 px-3 py-1 rounded transition">🔄 Refresh</button>
+  </div>
+  
+  <div id="logs-container" class="bg-slate-900 rounded p-4 font-mono text-sm max-h-96 overflow-y-auto">
+    <div class="text-slate-500">Loading logs...</div>
+  </div>
+  
+  <div class="text-xs text-slate-500 mt-2">
+    Auto-refresh every <span id="refresh-interval">5</span>s • <a href="{{ url_for('logs') }}" class="text-indigo-400 hover:text-indigo-300">View all logs →</a>
+  </div>
+</div>
+
+<script>
+  async function refreshLogs() {
+    try {
+      const response = await fetch('/api/logs?lines=30');
+      const data = await response.json();
+      const container = document.getElementById('logs-container');
+      
+      if (data.logs.length === 0) {
+        container.innerHTML = '<div class="text-slate-500">No logs yet</div>';
+      } else {
+        container.innerHTML = data.logs
+          .map(line => `<div class="log-line text-slate-300">${escapeHtml(line)}</div>`)
+          .join('');
+        // Auto-scroll to bottom
+        container.scrollTop = container.scrollHeight;
+      }
+    } catch (err) {
+      console.error('Error fetching logs:', err);
+    }
+  }
+  
+  function escapeHtml(text) {
+    const map = {
+      '&': '&amp;',
+      '<': '&lt;',
+      '>': '&gt;',
+      '"': '&quot;',
+      "'": '&#039;'
+    };
+    return text.replace(/[&<>"']/g, m => map[m]);
+  }
+  
+  // Initial load and auto-refresh
+  refreshLogs();
+  setInterval(refreshLogs, 5000);
+</script>
 {% endblock %}

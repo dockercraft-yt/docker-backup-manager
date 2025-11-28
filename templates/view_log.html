@@ -1,0 +1,22 @@
+{% extends "layout.html" %}
+
+{% block title %}View Log - Docker Backup Manager{% endblock %}
+{% block header %}📋 {{ log_name }}{% endblock %}
+
+{% block content %}
+<div class="space-y-4">
+  <div class="flex justify-between items-center">
+    <a href="{{ url_for('logs') }}" class="text-indigo-400 hover:text-indigo-300">← Back to Logs</a>
+    <a href="{{ url_for('download_log', log_name=log_name) }}" class="bg-slate-700 hover:bg-slate-600 px-3 py-1 rounded text-sm">⬇️ Download</a>
+  </div>
+  
+  <div class="bg-slate-900 rounded-lg p-4 border border-slate-700 font-mono text-sm max-h-96 overflow-y-auto">
+    {% set lines = content.split('\n') %}
+    {% for line in lines %}
+      {% if line %}
+        <div class="log-line text-slate-300">{{ line }}</div>
+      {% endif %}
+    {% endfor %}
+  </div>
+</div>
+{% endblock %}

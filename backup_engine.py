@@ -1,297 +1,385 @@
+"""Docker Backup Engine
+
+Handles backup/restore operations for Docker Compose stacks.
+Features:
+  - YAML configuration support
+  - Compose file + data directory backup as tar.gz
+  - Container stop/start with skip-list
+  - Automatic log rotation & retention
+  - Detailed logging with timestamps
+"""
+
 import os
 import subprocess
 import tarfile
 import shutil
+from pathlib import Path
 from datetime import datetime, timedelta
+from typing import List, Optional
 import yaml
 
 
 class BackupEngine:
-    def __init__(self, config_path="/app/config.yaml"):
-        # Load configuration
-        with open(config_path, "r") as f:
-            self.cfg = yaml.safe_load(f)
+    """Main backup orchestrator for Docker stacks."""
 
-        # Config values with basic validation/defaults
-        self.stacks_dir = self.cfg.get("stacks_dir", "/opt/stacks")
-        self.backup_dir = self.cfg.get("backup_dir", "/opt/backups")
-        self.log_dir = self.cfg.get("log_dir", "/opt/backup-logs")
-        self.include_data = bool(self.cfg.get("include_data", True))
-        self.skip_stop = set(self.cfg.get("skip_stop", []))
-        self.retention_days = int(self.cfg.get("retention_days", 7))
-        self.log_retention = int(self.cfg.get("log_retention_days", 14))
+    def __init__(self, config_path: str = "/app/config.yaml"):
+        """Initialize BackupEngine with configuration.
+        
+        Args:
+            config_path: Path to YAML configuration file.
+        """
+        self.config_path = config_path
+        self._config = self._load_config()
+        
+        # Directories
+        self.stacks_dir = self._config.get("stacks_dir", "/opt/stacks")
+        self.backup_dir = self._config.get("backup_dir", "/opt/backups")
+        self.log_dir = self._config.get("log_dir", "/opt/backup-logs")
+        
+        # Behavior
+        self.include_data = bool(self._config.get("include_data", True))
+        self.skip_stop = set(self._config.get("skip_stop", []) or [])
+        self.retention_days = int(self._config.get("retention_days", 7))
+        self.log_retention_days = int(self._config.get("log_retention_days", 14))
+        
+        # Ensure directories exist
+        for d in [self.stacks_dir, self.backup_dir, self.log_dir]:
+            Path(d).mkdir(parents=True, exist_ok=True)
+        
+        # Today's log file
+        today = datetime.now().strftime("%Y-%m-%d")
+        self.log_file = os.path.join(self.log_dir, f"backup_{today}.log")
+        
+        # In-memory logs for web UI
+        self._log_buffer = []
 
-        os.makedirs(self.backup_dir, exist_ok=True)
-        os.makedirs(self.log_dir, exist_ok=True)
-
-        # Logging filename
-        date = datetime.now().strftime("%Y-%m-%d")
-        self.log_file = os.path.join(self.log_dir, f"backup_{date}.log")
-
-    # =====================================================================
-    # Logging
-    # =====================================================================
-    def log(self, msg):
-        timestamp = datetime.now().strftime("[%Y-%m-%d %H:%M:%S]")
-        line = f"{timestamp} {msg}"
-        print(line)
+    def _load_config(self) -> dict:
+        """Load YAML configuration with fallback to defaults."""
         try:
-            with open(self.log_file, "a") as f:
-                f.write(line + "\n")
+            with open(self.config_path, "r", encoding="utf-8") as f:
+                cfg = yaml.safe_load(f) or {}
+                return cfg
+        except FileNotFoundError:
+            print(f"⚠️  Config file not found: {self.config_path}; using defaults", flush=True)
+            return {}
+        except yaml.YAMLError as e:
+            print(f"⚠️  YAML parse error: {e}; using defaults", flush=True)
+            return {}
+
+    def log(self, msg: str, level: str = "INFO") -> None:
+        """Write log message to file and buffer.
+        
+        Args:
+            msg: Log message.
+            level: Log level (INFO, WARNING, ERROR, SUCCESS).
+        """
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        line = f"[{timestamp}] [{level:8s}] {msg}\n"
+        
+        # Write to file
+        try:
+            with open(self.log_file, "a", encoding="utf-8") as f:
+                f.write(line)
         except Exception as e:
-            # Fail-safe: if logging to file fails, still print
-            print(f"[LOG-ERROR] Could not write to log file {self.log_file}: {e}")
+            print(f"[LOG-ERROR] Could not write to {self.log_file}: {e}", flush=True)
+        
+        # Buffer for web UI
+        self._log_buffer.append(line.rstrip("\n"))
+        # Keep last 500 lines in memory
+        if len(self._log_buffer) > 500:
+            self._log_buffer.pop(0)
+        
+        # Print to console (unbuffered)
+        print(line, end="", flush=True)
 
-    # =====================================================================
-    # Docker helpers
-    # =====================================================================
-    def run_compose(self, stack_path, args):
-        """Run docker compose commands inside a stack directory."""
+    def get_recent_logs(self, lines: int = 100) -> List[str]:
+        """Get recent log entries from buffer.
+        
+        Args:
+            lines: Number of recent lines to return.
+        
+        Returns:
+            List of log lines.
+        """
+        return self._log_buffer[-lines:]
+
+    def run_compose(self, stack_path: str, args: List[str], check: bool = True) -> bool:
+        """Execute docker compose command in stack directory.
+        
+        Args:
+            stack_path: Path to stack directory.
+            args: Arguments to pass to `docker compose`.
+            check: If True, raise on non-zero exit code.
+        
+        Returns:
+            True if successful, False otherwise.
+        """
         try:
-            completed = subprocess.run(
+            result = subprocess.run(
                 ["docker", "compose"] + args,
                 cwd=stack_path,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                check=True,
+                text=True,
+                check=False,
+                timeout=120,
             )
-            stdout = completed.stdout.decode().strip()
-            stderr = completed.stderr.decode().strip()
-            if stdout:
-                self.log(f"docker compose {' '.join(args)} output: {stdout}")
-            if stderr:
-                self.log(f"docker compose {' '.join(args)} stderr: {stderr}")
+            
+            if result.returncode != 0:
+                err_msg = result.stderr.strip() or result.stdout.strip()
+                self.log(f"⚠️  docker compose {' '.join(args)} failed: {err_msg}", level="WARNING")
+                return not check
+            
+            if result.stdout.strip():
+                self.log(f"docker compose output: {result.stdout.strip()}", level="DEBUG")
+            
             return True
-        except subprocess.CalledProcessError as e:
-            self.log(f"⚠️ docker compose {' '.join(args)} failed: returncode={e.returncode}")
-            try:
-                err = e.stderr.decode().strip() if e.stderr else ""
-                out = e.stdout.decode().strip() if e.stdout else ""
-                if out:
-                    self.log(f"stdout: {out}")
-                if err:
-                    self.log(f"stderr: {err}")
-            except Exception:
-                pass
+            
+        except subprocess.TimeoutExpired:
+            self.log(f"❌ docker compose {' '.join(args)} timed out (120s)", level="ERROR")
             return False
         except Exception as e:
-            self.log(f"⚠️ Unexpected error running docker compose {' '.join(args)}: {e}")
+            self.log(f"❌ Error running docker compose {' '.join(args)}: {e}", level="ERROR")
             return False
 
-    def is_stack_running(self, stack_path):
-        """Return True if compose reports running containers."""
+    def is_stack_running(self, stack_path: str) -> bool:
+        """Check if any container in the stack is running.
+        
+        Args:
+            stack_path: Path to stack directory.
+        
+        Returns:
+            True if running containers exist, False otherwise.
+        """
         try:
             result = subprocess.run(
                 ["docker", "compose", "ps", "-q"],
                 cwd=stack_path,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                check=False
+                text=True,
+                timeout=10,
+                check=False,
             )
-            out = result.stdout.decode().strip()
-            if not out:
-                return False
-            count = len(out.splitlines())
-            return count > 0
+            containers = result.stdout.strip().splitlines()
+            return len(containers) > 0
         except Exception as e:
-            self.log(f"⚠️ Error checking stack running state at {stack_path}: {e}")
+            self.log(f"⚠️  Could not check stack status at {stack_path}: {e}", level="WARNING")
             return False
 
-    def stop_stack(self, stack_path, name):
-        self.log(f"⏸️  Stopping containers for stack: {name}")
-        ok = self.run_compose(stack_path, ["down"])
-        if not ok:
-            self.log(f"⚠️  Could not stop {name} (maybe not running or compose error).")
+    def stop_stack(self, stack_path: str, stack_name: str) -> bool:
+        """Stop all containers in a stack.
+        
+        Args:
+            stack_path: Path to stack directory.
+            stack_name: Name of the stack (for logging).
+        
+        Returns:
+            True if successful, False otherwise.
+        """
+        self.log(f"⏸️  Stopping stack: {stack_name}")
+        return self.run_compose(stack_path, ["down"], check=False)
 
-    def start_stack(self, stack_path, name):
-        self.log(f"▶️  Restarting containers for stack: {name}")
-        ok = self.run_compose(stack_path, ["up", "-d"])
-        if not ok:
-            self.log(f"⚠️  Could not start {name} back up!")
+    def start_stack(self, stack_path: str, stack_name: str) -> bool:
+        """Start all containers in a stack.
+        
+        Args:
+            stack_path: Path to stack directory.
+            stack_name: Name of the stack (for logging).
+        
+        Returns:
+            True if successful, False otherwise.
+        """
+        self.log(f"▶️  Starting stack: {stack_name}")
+        return self.run_compose(stack_path, ["up", "-d"], check=False)
 
-    # =====================================================================
-    # Stack detection
-    # =====================================================================
-    def get_stacks(self):
-        stacks = []
+    def get_stacks(self) -> List[str]:
+        """List all available stacks in stacks_dir.
+        
+        Returns:
+            Sorted list of stack directory names.
+        """
         try:
             if not os.path.isdir(self.stacks_dir):
-                self.log(f"⚠️ Stacks directory does not exist: {self.stacks_dir}")
-                return stacks
-            for entry in sorted(os.listdir(self.stacks_dir)):
-                path = os.path.join(self.stacks_dir, entry)
-                if os.path.isdir(path):
-                    stacks.append(entry)
+                return []
+            stacks = [
+                d for d in os.listdir(self.stacks_dir)
+                if os.path.isdir(os.path.join(self.stacks_dir, d)) and not d.startswith(".")
+            ]
+            return sorted(stacks)
         except Exception as e:
-            self.log(f"⚠️ Error listing stacks in {self.stacks_dir}: {e}")
-        return stacks
+            self.log(f"❌ Error listing stacks in {self.stacks_dir}: {e}", level="ERROR")
+            return []
 
-    # =====================================================================
-    # Backup logic
-    # =====================================================================
-    def backup_stack(self, stack_name):
+    def backup_stack(self, stack_name: str) -> Optional[str]:
+        """Create a full backup of a stack (compose files + data).
+        
+        Args:
+            stack_name: Name of the stack to backup.
+        
+        Returns:
+            Path to final backup archive, or None if failed.
+        """
         stack_path = os.path.join(self.stacks_dir, stack_name)
+        
+        if not os.path.isdir(stack_path):
+            self.log(f"❌ Stack directory not found: {stack_path}", level="ERROR")
+            return None
+        
         timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-        stack_backup_dir = os.path.join(self.backup_dir, f"{stack_name}_{timestamp}")
-
-        self.log(f"📦 Processing stack: {stack_name}")
+        backup_name = f"{stack_name}_{timestamp}"
+        temp_dir = os.path.join(self.backup_dir, f".tmp_{backup_name}")
+        final_archive = os.path.join(self.backup_dir, f"{backup_name}.tar.gz")
+        
+        self.log(f"📦 Starting backup: {stack_name}")
+        
         try:
-            os.makedirs(stack_backup_dir, exist_ok=True)
-        except Exception as e:
-            self.log(f"❌ Could not create stack backup directory {stack_backup_dir}: {e}")
-            return
-
-        # ------------------------------------------------------------------
-        # 1. Copy compose.yml, compose.yaml, .env
-        # ------------------------------------------------------------------
-        self.log("📝 Copying compose files + .env...")
-        for filename in ["compose.yml", "compose.yaml", ".env", "docker-compose.yml", "docker-compose.yaml"]:
-            src = os.path.join(stack_path, filename)
-            if os.path.isfile(src):
-                try:
-                    shutil.copy2(src, stack_backup_dir)
-                except Exception as e:
-                    self.log(f"⚠️ Could not copy {src} -> {stack_backup_dir}: {e}")
-
-        # ------------------------------------------------------------------
-        # 2. Data directories
-        # ------------------------------------------------------------------
-        if self.include_data:
-            if stack_name in self.skip_stop:
-                self.log(f"🚫 Skipping stop & data backup for critical stack: {stack_name}")
-            else:
+            # Create temp directory
+            Path(temp_dir).mkdir(parents=True, exist_ok=True)
+            
+            # Step 1: Copy compose files
+            self.log(f"📝 Copying compose configuration...")
+            compose_files = ["compose.yml", "compose.yaml", "docker-compose.yml", ".env"]
+            for fname in compose_files:
+                src = os.path.join(stack_path, fname)
+                if os.path.isfile(src):
+                    shutil.copy2(src, temp_dir)
+                    self.log(f"  ✓ Copied {fname}")
+            
+            # Step 2: Backup data directories (if enabled and not in skip_stop)
+            if self.include_data and stack_name not in self.skip_stop:
+                self.log(f"🗂️  Backing up data directories...")
                 was_running = self.is_stack_running(stack_path)
-
+                
                 if was_running:
-                    self.log("🟢 Stack is running — stopping for backup...")
                     self.stop_stack(stack_path, stack_name)
-                else:
-                    self.log("⚪ Stack is not running — will not start after backup.")
-
-                # Data folders (all subfolders)
+                
                 try:
-                    subdirs = [
-                        d for d in sorted(os.listdir(stack_path))
-                        if os.path.isdir(os.path.join(stack_path, d)) and not d.startswith(".")
-                    ]
-                except Exception as e:
-                    self.log(f"⚠️ Error listing subdirectories for {stack_path}: {e}")
-                    subdirs = []
-
-                if subdirs:
-                    self.log(f"🗂️  Found {len(subdirs)} directories, backing them up...")
-                    tar_path = os.path.join(stack_backup_dir, f"{stack_name}_data.tar.gz")
-                    try:
-                        with tarfile.open(tar_path, "w:gz") as tar:
-                            for d in subdirs:
-                                srcdir = os.path.join(stack_path, d)
-                                # Add directory contents, preserve directory name
-                                tar.add(srcdir, arcname=d)
-                    except Exception as e:
-                        self.log(f"❌ Error creating data tarball {tar_path}: {e}")
-                else:
-                    self.log(f"⚠️ No data directories found for {stack_name}")
-
-                # Restart if it was running
-                if was_running:
-                    self.start_stack(stack_path, stack_name)
-        else:
-            self.log("ℹ️  Skipping data backup (include_data=false)")
-
-        # ------------------------------------------------------------------
-        # 3. Compress final backup folder
-        # ------------------------------------------------------------------
-        self.log("📦 Compressing final archive...")
-        final_archive = f"{stack_backup_dir}.tar.gz"
-        try:
+                    # Tar all subdirectories
+                    data_tar = os.path.join(temp_dir, "data.tar.gz")
+                    self._create_tar(stack_path, data_tar, exclude_files=[".git", ".gitignore", "docker-compose.yml", "compose.yml", "compose.yaml", ".env"])
+                    self.log(f"  ✓ Data backup created")
+                finally:
+                    # Always restart if it was running
+                    if was_running:
+                        self.start_stack(stack_path, stack_name)
+            
+            # Step 3: Create final archive
+            self.log(f"📦 Compressing backup archive...")
             with tarfile.open(final_archive, "w:gz") as tar:
-                # Use arcname so the top-level folder in tar is just the basename
-                tar.add(stack_backup_dir, arcname=os.path.basename(stack_backup_dir))
+                tar.add(temp_dir, arcname=backup_name)
+            
+            archive_size_mb = os.path.getsize(final_archive) / (1024 * 1024)
+            self.log(f"✅ Backup complete: {backup_name}.tar.gz ({archive_size_mb:.1f} MB)", level="SUCCESS")
+            
+            return final_archive
+            
         except Exception as e:
-            self.log(f"❌ Error compressing final archive {final_archive}: {e}")
-            # attempt to clean up and return
-            try:
-                shutil.rmtree(stack_backup_dir)
-            except Exception:
-                pass
-            return
+            self.log(f"❌ Backup failed for {stack_name}: {e}", level="ERROR")
+            return None
+        
+        finally:
+            # Cleanup temp directory
+            if os.path.exists(temp_dir):
+                try:
+                    shutil.rmtree(temp_dir)
+                except Exception:
+                    pass
 
-        # remove temp folder
-        try:
-            shutil.rmtree(stack_backup_dir)
-        except Exception as e:
-            self.log(f"⚠️ Could not remove temp folder {stack_backup_dir}: {e}")
+    def _create_tar(self, src_dir: str, tar_path: str, exclude_files: Optional[List[str]] = None) -> None:
+        """Create a tar.gz archive of a directory.
+        
+        Args:
+            src_dir: Source directory to tar.
+            tar_path: Path to output tar.gz file.
+            exclude_files: List of filenames to exclude.
+        """
+        exclude_files = exclude_files or []
+        
+        def tar_filter(tarinfo):
+            # Exclude certain files/dirs
+            if tarinfo.name.split("/")[-1] in exclude_files:
+                return None
+            return tarinfo
+        
+        with tarfile.open(tar_path, "w:gz") as tar:
+            tar.add(src_dir, arcname="data", filter=tar_filter)
 
-        self.log(f"✅ Backup complete: {final_archive}")
-
-    # =====================================================================
-    # Retention
-    # =====================================================================
-    def run_retention(self):
+    def run_retention(self) -> None:
+        """Remove old backups and logs based on retention policy."""
+        self.log(f"🧹 Running retention cleanup...")
+        
         cutoff_backups = datetime.now() - timedelta(days=self.retention_days)
-        cutoff_logs = datetime.now() - timedelta(days=self.log_retention)
-
-        # Remove old backups
+        cutoff_logs = datetime.now() - timedelta(days=self.log_retention_days)
+        
+        # Clean old backups
         try:
-            for f in os.listdir(self.backup_dir):
-                if f.endswith(".tar.gz"):
-                    full = os.path.join(self.backup_dir, f)
-                    try:
-                        mtime = datetime.fromtimestamp(os.path.getmtime(full))
-                        if mtime < cutoff_backups:
-                            os.remove(full)
-                            self.log(f"🧹 Removed old backup: {full}")
-                    except Exception as e:
-                        self.log(f"⚠️ Error checking/removing backup {full}: {e}")
+            for fname in os.listdir(self.backup_dir):
+                if fname.startswith(".tmp_"):
+                    continue
+                fpath = os.path.join(self.backup_dir, fname)
+                try:
+                    mtime = datetime.fromtimestamp(os.path.getmtime(fpath))
+                    if mtime < cutoff_backups and fname.endswith(".tar.gz"):
+                        os.remove(fpath)
+                        self.log(f"  🗑️  Removed old backup: {fname}")
+                except Exception as e:
+                    self.log(f"  ⚠️  Could not process {fname}: {e}", level="WARNING")
         except Exception as e:
-            self.log(f"⚠️ Error scanning backup directory {self.backup_dir}: {e}")
-
-        # Remove old logs
+            self.log(f"❌ Error cleaning backups: {e}", level="ERROR")
+        
+        # Clean old logs
         try:
-            for f in os.listdir(self.log_dir):
-                if f.startswith("backup_") and f.endswith(".log"):
-                    full = os.path.join(self.log_dir, f)
-                    try:
-                        mtime = datetime.fromtimestamp(os.path.getmtime(full))
-                        if mtime < cutoff_logs:
-                            os.remove(full)
-                            self.log(f"🧾 Removed old log: {full}")
-                    except Exception as e:
-                        self.log(f"⚠️ Error checking/removing log {full}: {e}")
+            for fname in os.listdir(self.log_dir):
+                if not fname.startswith("backup_") or not fname.endswith(".log"):
+                    continue
+                fpath = os.path.join(self.log_dir, fname)
+                try:
+                    mtime = datetime.fromtimestamp(os.path.getmtime(fpath))
+                    if mtime < cutoff_logs:
+                        os.remove(fpath)
+                        self.log(f"  📋 Removed old log: {fname}")
+                except Exception as e:
+                    self.log(f"  ⚠️  Could not process {fname}: {e}", level="WARNING")
         except Exception as e:
-            self.log(f"⚠️ Error scanning log directory {self.log_dir}: {e}")
+            self.log(f"❌ Error cleaning logs: {e}", level="ERROR")
+        
+        self.log(f"✅ Retention cleanup complete", level="SUCCESS")
 
-    # =====================================================================
-    # MAIN entry
-    # =====================================================================
-    def run_backup(self):
-        stacks = self.get_stacks()
-        timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-
-        self.log("==============================================================")
-        self.log(f"🚀 Starting Docker Backup — {timestamp}")
-        self.log(f"Configuration loaded from config.yaml")
-        self.log(f"Logs written to: {self.log_file}")
-        self.log("==============================================================")
-
-        self.log(f"📋 Found {len(stacks)} stacks:")
-        for s in stacks:
-            if s in self.skip_stop:
-                self.log(f"   🚫 {s} (skipped from stop/data backup)")
-            else:
-                self.log(f"   ✅ {s} (full backup)")
-        self.log("--------------------------------------------------------------")
-
-        for stack in stacks:
+    def backup_selected_stacks(self, stack_names: List[str]) -> dict:
+        """Backup multiple stacks (typically from web UI).
+        
+        Args:
+            stack_names: List of stack names to backup.
+        
+        Returns:
+            Dictionary with results: {"success": [...], "failed": [...]}
+        """
+        results = {"success": [], "failed": []}
+        
+        self.log("=" * 70, level="INFO")
+        self.log(f"🚀 Batch backup started: {', '.join(stack_names)}", level="SUCCESS")
+        self.log("=" * 70)
+        
+        for stack_name in stack_names:
             try:
-                self.backup_stack(stack)
+                archive = self.backup_stack(stack_name)
+                if archive:
+                    results["success"].append(stack_name)
+                else:
+                    results["failed"].append(stack_name)
             except Exception as e:
-                self.log(f"❌ Unexpected error processing stack {stack}: {e}")
-
+                self.log(f"❌ Unexpected error backing up {stack_name}: {e}", level="ERROR")
+                results["failed"].append(stack_name)
+        
+        # Retention
         try:
             self.run_retention()
         except Exception as e:
-            self.log(f"⚠️ Error during retention run: {e}")
-
-        self.log("🎉 All backups completed (run_backup finished).")
-        self.log("==============================================================")
+            self.log(f"⚠️  Retention error: {e}", level="WARNING")
+        
+        self.log("=" * 70)
+        self.log(f"✅ Backup job complete: {len(results['success'])} succeeded, {len(results['failed'])} failed", level="SUCCESS")
+        self.log("=" * 70)
+        
+        return results

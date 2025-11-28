@@ -1,0 +1,32 @@
+{% extends "layout.html" %}
+
+{% block title %}Logs - Docker Backup Manager{% endblock %}
+{% block header %}📋 Logs{% endblock %}
+
+{% block content %}
+<div class="space-y-4">
+  {% if log_files %}
+    <div class="grid grid-cols-1 gap-4">
+      {% for log in log_files %}
+        <div class="bg-slate-800 rounded-lg p-4 border border-slate-700 hover:border-slate-600 transition">
+          <div class="flex justify-between items-start">
+            <div class="flex-1">
+              <h4 class="font-mono font-semibold text-indigo-400">{{ log.name }}</h4>
+              <p class="text-xs text-slate-500 mt-1">{{ "%.1f"|format(log.size_kb) }} KB</p>
+            </div>
+            <div class="space-x-2 flex">
+              <a href="{{ url_for('view_log', log_name=log.name) }}" class="bg-indigo-600 hover:bg-indigo-500 px-3 py-1 rounded text-sm transition">👁️ View</a>
+              <a href="{{ url_for('download_log', log_name=log.name) }}" class="bg-slate-700 hover:bg-slate-600 px-3 py-1 rounded text-sm transition">⬇️ Download</a>
+            </div>
+          </div>
+        </div>
+      {% endfor %}
+    </div>
+  {% else %}
+    <div class="bg-slate-800 rounded-lg p-8 border border-slate-700 text-center">
+      <p class="text-slate-400">No backup logs found yet.</p>
+      <p class="text-sm text-slate-500 mt-2">Run your first backup to generate logs.</p>
+    </div>
+  {% endif %}
+</div>
+{% endblock %}

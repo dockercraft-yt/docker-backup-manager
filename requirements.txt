@@ -1,6 +1,15 @@
-Flask>=2.2
+# Web Framework
+Flask>=2.2.0
+Werkzeug>=2.2.0
+
+# YAML Configuration
 PyYAML>=6.0
+
+# Docker Integration
 docker>=6.0.0
 
-# WSGI server for production
-gunicorn>=20.1.0
+# WSGI Server (Production)
+gunicorn>=21.0.0
+
+# Optional: Better logging
+python-json-logger>=2.0.0

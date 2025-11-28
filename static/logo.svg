@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="400" height="120" viewBox="0 0 400 120">
+  <rect width="400" height="120" rx="12" fill="#0f172a"/>
+  <g transform="translate(24,14)">
+    <rect x="0" y="0" width="80" height="80" rx="8" fill="#1E3A8A"/>
+    <g transform="translate(12,10)" fill="#fff" opacity="0.95">
+      <rect x="0" y="0" width="24" height="24" rx="3" fill="#ffffff22"/>
+      <rect x="30" y="0" width="24" height="24" rx="3" fill="#ffffff22"/>
+      <rect x="0" y="30" width="24" height="24" rx="3" fill="#ffffff22"/>
+      <rect x="30" y="30" width="24" height="24" rx="3" fill="#ffffff22"/>
+    </g>
+    <text x="120" y="50" fill="#e6eef8" font-family="Segoe UI, Roboto, Arial" font-size="28" font-weight="700">Docker Backup Manager</text>
+  </g>
+</svg>

@@ -114,12 +114,23 @@ class BackupEngine:
         Returns:
             True if successful, False otherwise.
         """
-        # Prefer the docker CLI; if it's not available, log a clear error so
-        # the caller understands that the runtime has no docker executable.
-        if shutil.which("docker") is None:
+        # Prefer the docker CLI.
+        docker_bin = shutil.which("docker")
+        if docker_bin is None:
+            # If CLI missing, attempt an SDK-based fallback for `down` operations
+            # (stop & remove containers). Starting a compose stack (`up -d`) via
+            # SDK is non-trivial and not implemented here.
+            if "down" in args:
+                self.log("ℹ️  'docker' CLI not found; attempting Docker SDK fallback for 'down'...", level="WARNING")
+                try:
+                    return self._sdk_down(stack_path)
+                except Exception as e:
+                    self.log(f"❌ SDK fallback for 'down' failed: {e}", level="ERROR")
+                    return False
+
             self.log(
                 "❌ 'docker' executable not found in PATH; cannot run 'docker compose' commands. "
-                "Install Docker CLI in the container or enable a different orchestration method.",
+                "Install Docker CLI in the container or mount the Docker socket for SDK operations.",
                 level="ERROR",
             )
             return False
@@ -150,6 +161,55 @@ class BackupEngine:
             return False
         except Exception as e:
             self.log(f"❌ Error running docker compose {' '.join(args)}: {e}", level="ERROR")
+            return False
+
+    def _sdk_down(self, stack_path: str) -> bool:
+        """Attempt to stop and remove containers for the compose project using Docker SDK.
+
+        This is a pragmatic fallback used when the `docker` CLI is not available
+        inside the runtime but the Docker socket is mounted and `docker` python
+        package is installed.
+        """
+        try:
+            import docker as _docker
+
+            client = _docker.from_env()
+            project = os.path.basename(stack_path.rstrip("/"))
+            label = f"com.docker.compose.project={project}"
+            self.log(f"ℹ️  SDK: looking for containers with label {label}")
+
+            containers = client.containers.list(all=True, filters={"label": label})
+            if not containers:
+                self.log(f"ℹ️  SDK: no containers found for project {project}")
+                return False
+
+            for c in containers:
+                try:
+                    if c.status == "running":
+                        self.log(f"ℹ️  SDK: stopping container {c.name} ({c.id[:12]})")
+                        c.stop(timeout=10)
+                    self.log(f"ℹ️  SDK: removing container {c.name} ({c.id[:12]})")
+                    c.remove(v=True, force=True)
+                except Exception as exc:
+                    self.log(f"⚠️  SDK: failed to stop/remove {c.name}: {exc}", level="WARNING")
+
+            # Optionally remove networks labeled for the project
+            try:
+                nets = client.networks.list(filters={"label": label})
+                for n in nets:
+                    try:
+                        self.log(f"ℹ️  SDK: removing network {n.name}")
+                        n.remove()
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+            self.log(f"✅ SDK fallback 'down' completed for project {project}", level="SUCCESS")
+            return True
+
+        except Exception as e:
+            self.log(f"❌ Docker SDK error during fallback 'down': {e}", level="ERROR")
             return False
 
     def is_stack_running(self, stack_path: str) -> bool:
